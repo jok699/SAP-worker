@@ -9,6 +9,21 @@
 如图： <br>
 ![Image](https://github.com/jok699/SAP-worker/blob/main/image/kv.png) <br>
 
+## 2、每个应用启动一次就锁定了当天无法再次启动，可以手动解锁： ## 
+### 🔓 手动解锁方法： ###
+1）解锁单个应用 <br>
+https://your-worker.workers.dev/unlock?app=你的应用名称  <br>
+2）解锁所有应用 <br>
+https://your-worker.workers.dev/unlock  <br>
+3）查看当前锁状态 <br>
+https://your-worker.workers.dev/locks <br>
+
+### 某个app启动失败需要重新启动，可以先解锁后强制启动。 ### 
+强制启动单个应用： <br>
+https://your-worker.workers.dev/start?app=你的应用名称 <br>
+
+强制启动所有应用： <br>
+https://your-worker.workers.dev/start
 
 基于老罗的代码改动，感谢老罗：https://gist.github.com/uncleluogithub/083775a84afbff11f1057695ce29fddb <br>
 老罗油管视频详细教程： https://www.youtube.com/watch?v=w-j8yPE2fKg
