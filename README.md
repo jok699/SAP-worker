@@ -25,6 +25,9 @@ https://your-worker.workers.dev/start?app=你的应用名称 <br>
 强制启动所有应用： <br>
 https://your-worker.workers.dev/start <br>
 
+无需解锁强制启动（使用&force=1）：  <br>
+https://your-worker.workers.dev/start?app=你的应用名&force=1  <br>
+
 ## 感谢 ##
 
 基于老罗的代码改动：https://gist.github.com/uncleluogithub/083775a84afbff11f1057695ce29fddb <br>
