@@ -27,7 +27,7 @@ https://your-worker.workers.dev/start?app=你的应用名&force=1  <br>
 启动所有应用： <br>
 https://your-worker.workers.dev/start <br>
 
-# telegram bot版 #
+# 🤖telegram bot版 #
 ## 本版本接入电报机器人手工拉起 ##
 1）按照前面的部署流程，环境变量添加多两个变量：   <br>
 TELEGRAM_BOT_TOKEN，填写机器人token  <br>
