@@ -1,0 +1,18 @@
+[
+  {
+    "name": "production-frontend",
+    "CF_API": "https://api.cf.us-east-1.example.com",
+    "UAA_URL": "https://uaa.us-east-1.example.com",
+    "CF_USERNAME": "devops@company.com",
+    "CF_PASSWORD": "secure-password-123",
+    "APP_GUID": "12345678-90ab-cdef-ghij-klmnopqrstuv"
+  },
+  {
+    "name": "staging-backend", 
+    "CF_API": "https://api.cf.eu-central-1.example.com",
+    "UAA_URL": "https://uaa.eu-central-1.example.com",
+    "CF_USERNAME": "devops@company.com",
+    "CF_PASSWORD": "secure-password-456",
+    "APP_GUID": "abcdef12-3456-7890-bcde-fghijklmnopq"
+  }
+]
