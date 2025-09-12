@@ -29,10 +29,14 @@ https://your-worker.workers.dev/start <br>
 
 # telegram bot版 #
 ## 本版本接入电报机器人手工拉起 ##
-1）参考前面的部署流程，复制_worker2.js代码到你的worker上面，保存部署。 <br>
-2）环境变量添加多两个变量：   <br>
+1）按照前面的部署流程，环境变量添加多两个变量：   <br>
 TELEGRAM_BOT_TOKEN，填写机器人token  <br>
 TELEGRAM_ADMIN_IDS，填写你的电报ID，多个管理员使用英文逗号隔开。  <br>
+2）复制_worker2.js代码替换你的worker，保存部署。 <br> 
+3）设置webhook <br>
+https://your-worker.workers.dev/webhook?action=set   <br>
+提示ok表示成功。   <br>
+4）启动你的机器人愉快玩耍吧！
 
 ## 感谢 ##
 
