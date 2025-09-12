@@ -18,13 +18,13 @@ https://your-worker.workers.dev/unlock  <br>
 3）查看当前锁状态 <br>
 https://your-worker.workers.dev/locks <br>
 
-### 某个app启动失败需要重新启动，可以先解锁后强制启动。 ### 
-强制启动单个应用： <br>
+### 某个app启动失败需要重新启动，可以先解锁后手动启动。 ### 
+启动单个应用： <br>
 https://your-worker.workers.dev/start?app=你的应用名称 <br>
 无需解锁强制启动单个应用（使用&force=1）：  <br>
 https://your-worker.workers.dev/start?app=你的应用名&force=1  <br>
 
-强制启动所有应用： <br>
+启动所有应用： <br>
 https://your-worker.workers.dev/start <br>
 
 ## 感谢 ##
