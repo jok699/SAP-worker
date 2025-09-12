@@ -23,7 +23,9 @@ https://your-worker.workers.dev/locks <br>
 https://your-worker.workers.dev/start?app=你的应用名称 <br>
 
 强制启动所有应用： <br>
-https://your-worker.workers.dev/start
+https://your-worker.workers.dev/start <br>
+
+## 感谢 ##
 
 基于老罗的代码改动，感谢老罗：https://gist.github.com/uncleluogithub/083775a84afbff11f1057695ce29fddb <br>
 老罗油管视频详细教程： https://www.youtube.com/watch?v=w-j8yPE2fKg
