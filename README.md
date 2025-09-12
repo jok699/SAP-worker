@@ -1,4 +1,4 @@
-# 利用clouflare worker，SAP BTP多账户多app应用一起并发拉起保活 #
+# 利用clouflare worker，SAP BTP多账户多app应用一起并发拉起保活。可使用telegram bot手工拉起 #
 ## 1、创建worker项目 ##
 1）把_worker.js里面的代码复制粘贴到你的worker上面，保存部署。 <br>
 2）添加环境变量，名称：APPS_CONFIG，对应的值复制APPS_CONFIG.json里面的代码，改成你自己的账号信息，保存。 <br>
