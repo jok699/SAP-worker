@@ -3,6 +3,30 @@ const pad = n => String(n).padStart(2, "0");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (o, c = 200) => new Response(JSON.stringify(o), { status: c, headers: { "content-type": "application/json" } });
 
+// 计算到第二天UTC 0点的秒数
+function getSecondsUntilNextUTCMidnight() {
+  const now = new Date();
+  const utcNow = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    now.getUTCHours(),
+    now.getUTCMinutes(),
+    now.getUTCSeconds()
+  );
+  
+  // 明天UTC 0点
+  const nextUTCMidnight = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0, 0, 0
+  );
+  
+  const seconds = Math.floor((nextUTCMidnight - utcNow) / 1000);
+  return Math.max(3600, seconds); // 确保至少1小时
+}
+
 // 工具函数
 async function cfGET(u, t) {
   const r = await fetch(u, { headers: { authorization: `Bearer ${t}` } });
@@ -101,7 +125,7 @@ async function waitProcessInstancesRunning(api, tok, pid) {
   throw new Error("Process instances not RUNNING in time");
 }
 
-// 核心函数 - 每个app独立锁死
+// 核心函数 - 修复锁机制，确保每天UTC0点都能启动
 async function ensureAppRunning(appConfig, env, { reason = "unknown", force = false } = {}) {
   console.log(`[${appConfig.name}] trigger`, reason, new Date().toISOString());
   
@@ -131,8 +155,10 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
     
     if (st.some(s => s === "RUNNING")) {
       console.log(`[${appConfig.name}] already RUNNING → nothing to do`);
-      // 即使已经在运行，也设置锁，避免重复检查
-      await env.START_LOCK.put(lockKey, "1", { expirationTtl: 3600 * 25 }); // 25小时过期（确保跨天）
+      // 即使已经在运行，也设置锁（在第二天UTC0点过期）
+      const expirationTtl = getSecondsUntilNextUTCMidnight();
+      await env.START_LOCK.put(lockKey, "1", { expirationTtl });
+      console.log(`[${appConfig.name}] lock set until next UTC midnight`, lockKey);
       return { success: true, app: appConfig.name, reason: "already_running" };
     }
 
@@ -156,9 +182,10 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
       }
     }
 
-    // 设置这个app的独立锁（25小时过期）
-    await env.START_LOCK.put(lockKey, "1", { expirationTtl: 3600 * 25 });
-    console.log(`[${appConfig.name}] lock set`, lockKey);
+    // 设置锁，在第二天UTC 0点过期
+    const expirationTtl = getSecondsUntilNextUTCMidnight();
+    await env.START_LOCK.put(lockKey, "1", { expirationTtl });
+    console.log(`[${appConfig.name}] lock set for ${expirationTtl} seconds`, lockKey);
     
     return { success: true, app: appConfig.name };
   } catch (error) {
@@ -263,8 +290,14 @@ export default {
       let APPS;
       try {
         APPS = JSON.parse(env.APPS_CONFIG || "[]");
+        console.log("APPS parsed successfully:", APPS.length, "apps");
       } catch (e) {
-        return json({ ok: false, error: "Invalid APPS_CONFIG JSON format" }, 500);
+        console.error("JSON parse error:", e.message);
+        return json({ 
+          ok: false, 
+          error: "Invalid APPS_CONFIG JSON format",
+          details: e.message
+        }, 500);
       }
       
       // API 路由处理
@@ -279,8 +312,7 @@ export default {
               hasAPI: !!app.CF_API,
               hasUAA: !!app.UAA_URL,
               hasCredentials: !!(app.CF_USERNAME && app.CF_PASSWORD),
-              hasGUID: !!app.APP_GUID,
-              hasNames: !!(app.ORG_NAME && app.SPACE_NAME && app.APP_NAME)
+              hasGUID: !!app.APP_GUID
             }
           }));
           return json({ ok: true, apps: appsList, total: appsList.length });
@@ -333,36 +365,21 @@ export default {
           }
           
         case "/diag":
-          const diagAppName = url.searchParams.get("app");
+          const now = new Date();
+          const utcH = now.getUTCHours();
+          const utcM = now.getUTCMinutes();
+          const secondsUntilMidnight = getSecondsUntilNextUTCMidnight();
           
-          if (diagAppName) {
-            const diagAppConfig = APPS.find(a => a.name === diagAppName);
-            if (!diagAppConfig) return json({ ok: false, error: "App not found" }, 404);
-            
-            try {
-              const tok = await getUAAToken(diagAppConfig);
-              return json({ 
-                ok: true, 
-                app: diagAppName, 
-                token_len: tok?.length || 0, 
-                api: diagAppConfig.CF_API,
-                has_guid: !!diagAppConfig.APP_GUID
-              });
-            } catch (error) {
-              return json({ ok: false, app: diagAppName, error: error.message });
-            }
-          } else {
-            const now = new Date();
-            return json({ 
-              ok: true, 
-              app_count: APPS.length,
-              enabled_count: APPS.filter(app => app.enabled !== false).length,
-              config_valid: true,
-              current_time: now.toISOString(),
-              utc_time: `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())} UTC`,
-              memory: typeof WebAssembly !== 'undefined' ? 'available' : 'unavailable'
-            });
-          }
+          return json({ 
+            ok: true, 
+            app_count: APPS.length,
+            enabled_count: APPS.filter(app => app.enabled !== false).length,
+            current_time: now.toISOString(),
+            utc_time: `${pad(utcH)}:${pad(utcM)} UTC`,
+            seconds_until_utc_midnight: secondsUntilMidnight,
+            next_utc_midnight: new Date(Date.now() + secondsUntilMidnight * 1000).toISOString(),
+            lock_mechanism: "daily_lock_until_utc_midnight"
+          });
           
         case "/unlock":
           const unlockAppName = url.searchParams.get("app");
@@ -401,12 +418,13 @@ export default {
         default:
           return json({ 
             ok: true, 
-            message: "Multi-App Cloud Foundry Manager - Independent Lock System",
-            version: "2.0",
-            description: "Each app has independent daily lock mechanism",
+            message: "Multi-App Cloud Foundry Manager - Fixed Lock Mechanism",
+            version: "2.1",
+            description: "Each app has independent daily lock that expires at UTC midnight",
             endpoints: [
               "GET /list-apps - List all configured apps",
               "GET /start?app=name - Start specific app",
+              "GET /start?app=name&force=1 - Force start specific app",
               "GET /start - Start all enabled apps", 
               "GET /stop?app=name - Stop specific app",
               "GET /state?app=name - Get app status",
