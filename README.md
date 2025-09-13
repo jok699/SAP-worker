@@ -1,6 +1,6 @@
 # 利用clouflare worker，SAP BTP多账户多app应用一起并发拉起保活。可使用telegram bot手工拉起 #
 ## 1、创建worker项目 ##
-1）把_worker.js里面的代码复制粘贴到你的worker上面，保存部署。 <br>
+1）把[_worker.js](https://github.com/jok699/SAP-worker/blob/main/_worker.js)里面的代码复制粘贴到你的worker上面，保存部署。 <br>
 2）添加环境变量，名称：APPS_CONFIG，对应的值复制APPS_CONFIG.json里面的代码，改成你自己的账号信息，保存。 <br>
 设置触发时间每分钟。 <br>
 如图： <br>
@@ -32,7 +32,7 @@ https://your-worker.workers.dev/start <br>
 1）按照前面的部署流程，环境变量添加多两个变量：   <br>
 TELEGRAM_BOT_TOKEN，填写机器人token  <br>
 TELEGRAM_ADMIN_IDS，填写你的电报ID，多个管理员使用英文逗号隔开。  <br>
-2）复制_worker2.js代码替换你的worker，保存部署。 <br> 
+2）复制[_worker2.js](https://github.com/jok699/SAP-worker/blob/main/_worker2.js)代码替换你的worker，保存部署。 <br> 
 3）设置webhook <br>
 https://your-worker.workers.dev/webhook?action=set   <br>
 提示ok表示成功。   <br>
