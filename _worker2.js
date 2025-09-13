@@ -1,7 +1,74 @@
-// 单文件多应用管理器 - 集成Telegram Bot（Webhook修复版）
+// 单文件多应用管理器 - 集成Telegram Bot和独立锁死机制
 const pad = n => String(n).padStart(2, "0");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (o, c = 200) => new Response(JSON.stringify(o), { status: c, headers: { "content-type": "application/json" } });
+
+// KV辅助函数
+async function kvGet(env, key) {
+  if (!env.START_LOCK) {
+    console.warn("KV START_LOCK not available, returning null for", key);
+    return null;
+  }
+  try {
+    return await env.START_LOCK.get(key);
+  } catch (error) {
+    console.error("KV get error:", error.message);
+    return null;
+  }
+}
+
+async function kvPut(env, key, value, options = {}) {
+  if (!env.START_LOCK) {
+    console.warn("KV START_LOCK not available, skip put", key);
+    return false;
+  }
+  try {
+    await env.START_LOCK.put(key, value, options);
+    return true;
+  } catch (error) {
+    console.error("KV put error:", error.message);
+    return false;
+  }
+}
+
+async function kvDelete(env, key) {
+  if (!env.START_LOCK) {
+    console.warn("KV START_LOCK not available, skip delete", key);
+    return false;
+  }
+  try {
+    await env.START_LOCK.delete(key);
+    return true;
+  } catch (error) {
+    console.error("KV delete error:", error.message);
+    return false;
+  }
+}
+
+// 计算到第二天UTC 0点的秒数
+function getSecondsUntilNextUTCMidnight() {
+  const now = new Date();
+  const utcNow = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    now.getUTCHours(),
+    now.getUTCMinutes(),
+    now.getUTCSeconds(),
+    now.getUTCMilliseconds()
+  );
+  
+  // 明天UTC 0点
+  const nextUTCMidnight = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0, 0, 0, 0
+  );
+  
+  const seconds = Math.floor((nextUTCMidnight - utcNow) / 1000);
+  return Math.max(3600, seconds); // 确保至少1小时
+}
 
 // 管理员检查函数
 function isAdmin(env, userId) {
@@ -24,37 +91,6 @@ async function sendPermissionDenied(env, chatId) {
     '请联系系统管理员获取访问权限。',
     'HTML'
   );
-}
-
-// 计算到下一个UTC 0点的秒数
-function getSecondsUntilNextUTCMidnight() {
-  const now = new Date();
-  const currentUTCHours = now.getUTCHours();
-  const currentUTCMinutes = now.getUTCMinutes();
-  const currentUTCSeconds = now.getUTCSeconds();
-  
-  // 如果当前时间已经过了UTC 0点，则计算到明天UTC 0点的秒数
-  // 否则计算到今天UTC 0点的秒数
-  if (currentUTCHours > 0 || currentUTCMinutes > 0 || currentUTCSeconds > 0) {
-    // 已经过了UTC 0点，计算到明天UTC 0点的秒数
-    const nextUTCMidnight = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() + 1,
-      0, 0, 0, 0
-    ));
-    return Math.floor((nextUTCMidnight - now) / 1000);
-  } else {
-    // 还没到UTC 0点，计算到今天UTC 0点的秒数
-    const todayUTCMidnight = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      0, 0, 0, 0
-    ));
-    return Math.floor((todayUTCMidnight - now) / 1000);
-  }
-    return Math.max(3600, seconds); // 确保至少1小时
 }
 
 // Telegram Bot 工具函数
@@ -239,6 +275,7 @@ async function waitAppStarted(api, tok, gid) {
   for (let i = 0; i < 8; i++) {
     await sleep(d);
     s = await getAppState(api, tok, gid);
+    console.log("[app-state-check]", i, s);
     if (s === "STARTED") break;
     d = Math.min(d * 1.6, 15000);
   }
@@ -251,6 +288,7 @@ async function waitProcessInstancesRunning(api, tok, pid) {
     const st = await getProcessStats(api, tok, pid);
     const ins = st?.resources || [];
     const states = ins.map(it => it?.state);
+    console.log("[proc-stats]", states.join(",") || "no-instances");
     if (states.some(s => s === "RUNNING")) return;
     await sleep(d);
     d = Math.min(d * 1.6, 15000);
@@ -258,35 +296,22 @@ async function waitProcessInstancesRunning(api, tok, pid) {
   throw new Error("Process instances not RUNNING in time");
 }
 
-// 核心函数
+// 核心函数 - 修复锁机制，确保每天UTC0点都能启动
 async function ensureAppRunning(appConfig, env, { reason = "unknown", force = false } = {}) {
   console.log(`[${appConfig.name}] trigger`, reason, new Date().toISOString());
   
-  const now = new Date();
-  const ymd = now.toISOString().slice(0, 10);
+  // 每个app有独立的每日锁
+  const ymd = new Date().toISOString().slice(0, 10);
   const lockKey = `start-lock:${appConfig.name}:${ymd}`;
   
-  // 检查当前UTC时间，如果已经过了0点，则强制解锁
-  const currentUTCHour = now.getUTCHours();
-  const currentUTCMinute = now.getUTCMinutes();
-  
-  // 如果当前UTC时间在0点之后，清除昨天的锁
-  if (currentUTCHour > 0 || currentUTCMinute > 0) {
-    const yesterday = new Date(now);
-    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-    const yesterdayYmd = yesterday.toISOString().slice(0, 10);
-    const yesterdayLockKey = `start-lock:${appConfig.name}:${yesterdayYmd}`;
-    
-    // 删除昨天的锁
-    await env.START_LOCK.delete(yesterdayLockKey);
-  }
-  
   if (!force) {
-    const ex = await env.START_LOCK.get(lockKey);
+    const ex = await kvGet(env, lockKey);
     if (ex) {
       console.log(`[${appConfig.name}] lock exists, skip`, lockKey);
       return { success: false, app: appConfig.name, reason: "locked" };
     }
+  } else {
+    console.log(`[${appConfig.name}] force=1, ignore success-lock`);
   }
 
   try {
@@ -297,16 +322,23 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
     const pre = await getProcessStats(api, tok, pid);
     const st = (pre?.resources || []).map(it => it?.state);
     
+    console.log(`[${appConfig.name}] proc-before`, st.join(",") || "no-instances");
+    
     if (st.some(s => s === "RUNNING")) {
+      console.log(`[${appConfig.name}] already RUNNING → nothing to do`);
+      // 即使已经在运行，也设置锁（在第二天UTC0点过期）
       const expirationTtl = getSecondsUntilNextUTCMidnight();
-      await env.START_LOCK.put(lockKey, "1", { expirationTtl });
+      await kvPut(env, lockKey, "1", { expirationTtl });
+      console.log(`[${appConfig.name}] lock set until next UTC midnight`, lockKey);
       return { success: true, app: appConfig.name, reason: "already_running" };
     }
 
     let appState = await getAppState(api, tok, gid);
+    console.log(`[${appConfig.name}] app-state-before`, appState);
     
     if (appState !== "STARTED") {
       await cfPOST(`${api}/v3/apps/${gid}/actions/start`, tok);
+      console.log(`[${appConfig.name}] app start requested`);
     }
 
     await waitAppStarted(api, tok, gid);
@@ -315,13 +347,16 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
     if (appConfig.APP_PING_URL) {
       try {
         await fetch(appConfig.APP_PING_URL, { method: "GET" });
+        console.log(`[${appConfig.name}] ping ok`);
       } catch (e) {
         console.log(`[${appConfig.name}] ping fail`, e?.message || e);
       }
     }
 
+    // 设置锁，在第二天UTC 0点过期
     const expirationTtl = getSecondsUntilNextUTCMidnight();
-    await env.START_LOCK.put(lockKey, "1", { expirationTtl });
+    await kvPut(env, lockKey, "1", { expirationTtl });
+    console.log(`[${appConfig.name}] lock set for ${expirationTtl} seconds`, lockKey);
     
     return { success: true, app: appConfig.name };
   } catch (error) {
@@ -330,17 +365,19 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
   }
 }
 
-// 获取应用锁状态
-async function getAppLockStatus(appConfig, env) {
-  const ymd = new Date().toISOString().slice(0, 10);
-  const lockKey = `start-lock:${appConfig.name}:${ymd}`;
-  const locked = !!(await env.START_LOCK.get(lockKey));
-  
-  return {
-    app: appConfig.name,
-    locked: locked,
-    lockKey: lockKey
-  };
+// 停止应用
+async function stopApp(appConfig, env) {
+  try {
+    const api = appConfig.CF_API.replace(/\/+$/, "");
+    const tok = await getUAAToken(appConfig);
+    const gid = await resolveAppGuid(appConfig, tok, api);
+    await cfPOST(`${api}/v3/apps/${gid}/actions/stop`, tok);
+    console.log(`[${appConfig.name}] app stop requested`);
+    return { success: true, app: appConfig.name };
+  } catch (error) {
+    console.error(`[${appConfig.name}] stop error:`, error.message);
+    return { success: false, app: appConfig.name, error: error.message };
+  }
 }
 
 // 获取应用状态
@@ -350,15 +387,62 @@ async function getAppStatus(appConfig, env) {
     const tok = await getUAAToken(appConfig);
     const gid = await resolveAppGuid(appConfig, tok, api);
     const s = await getAppState(api, tok, gid);
+    const p = await getWebProcessGuid(api, tok, gid).catch(() => null);
+    const st = p ? await getProcessStats(api, tok, p) : null;
     
     return {
       success: true,
       app: appConfig.name,
-      appState: s
+      appGuid: gid,
+      appState: s,
+      instances: (st?.resources || []).map(it => ({
+        index: it?.index,
+        state: it?.state,
+        usage: it?.usage
+      }))
     };
   } catch (error) {
     console.error(`[${appConfig.name}] status error:`, error.message);
     return { success: false, app: appConfig.name, error: error.message };
+  }
+}
+
+// 获取应用锁状态
+async function getAppLockStatus(appConfig, env) {
+  const ymd = new Date().toISOString().slice(0, 10);
+  const lockKey = `start-lock:${appConfig.name}:${ymd}`;
+  const locked = !!(await kvGet(env, lockKey));
+  
+  return {
+    app: appConfig.name,
+    locked: locked,
+    lockKey: lockKey
+  };
+}
+
+// 清除所有应用的锁定状态
+async function clearAllAppLocks(env) {
+  try {
+    const APPS = JSON.parse(env.APPS_CONFIG || "[]");
+    const enabledApps = APPS.filter(app => app.enabled !== false);
+    const today = new Date().toISOString().slice(0, 10);
+    let clearedCount = 0;
+    
+    for (const app of enabledApps) {
+      const lockKey = `start-lock:${app.name}:${today}`;
+      const wasLocked = !!(await kvGet(env, lockKey));
+      
+      if (wasLocked) {
+        await kvDelete(env, lockKey);
+        clearedCount++;
+        console.log(`Cleared lock for ${app.name}`);
+      }
+    }
+    
+    return { success: true, clearedCount, totalCount: enabledApps.length };
+  } catch (error) {
+    console.error('Clear all locks error:', error);
+    return { success: false, error: error.message };
   }
 }
 
@@ -533,8 +617,8 @@ async function handleTelegramCallback(env, callbackQuery) {
         
         for (const app of enabledApps) {
           const lockKey = `start-lock:${app.name}:${ymdToday}`;
-          const wasLocked = !!(await env.START_LOCK.get(lockKey));
-          await env.START_LOCK.delete(lockKey);
+          const wasLocked = !!(await kvGet(env, lockKey));
+          await kvDelete(env, lockKey);
           if (wasLocked) unlockCount++;
         }
         
@@ -611,8 +695,10 @@ async function handleTelegramCallback(env, callbackQuery) {
           if (app) {
             const ymd = new Date().toISOString().slice(0, 10);
             const lockKey = `start-lock:${appName}:${ymd}`;
-            await env.START_LOCK.delete(lockKey);
+            await kvDelete(env, lockKey);
             await sendTelegramMessage(env, chatId, `✅ 应用 <code>${appName}</code> 已解锁`, 'HTML', createAppDetailKeyboard(appName));
+            await sleep(1000);
+            await showAppDetail(env, chatId, appName); // 刷新详情页面
           }
           break;
         }
@@ -645,50 +731,6 @@ async function handleTelegramCallback(env, callbackQuery) {
     console.error('Telegram callback error:', error);
     await sendTelegramMessage(env, chatId, `❌ 处理操作时出错: ${error.message}`, null, createMainMenuKeyboard());
   }
-}
-
-// 定时任务
-async function runAllInSchedule(env) {
-  const now = new Date();
-  const utcH = now.getUTCHours();
-  const utcM = now.getUTCMinutes();
-  
-  if (utcH === 0 && utcM % 2 === 0) {
-    try {
-      const APPS = JSON.parse(env.APPS_CONFIG || "[]");
-      const results = [];
-      
-      for (const app of APPS) {
-        if (app.enabled !== false) {
-          const result = await ensureAppRunning(app, env, { reason: "cron" });
-          results.push(result);
-          await sleep(1000);
-        }
-      }
-      
-      // 注释掉以下Telegram通知代码，关闭启动通知
-      /*
-      if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_ADMIN_IDS) {
-        const adminIds = env.TELEGRAM_ADMIN_IDS.split(',').map(id => id.trim());
-        const successCount = results.filter(r => r.success).length;
-        const totalCount = APPS.filter(app => app.enabled !== false).length;
-        
-        for (const adminId of adminIds) {
-          await sendTelegramMessage(env, adminId,
-            `⏰ <b>定时启动报告</b>\n` +
-            `时间: ${new Date().toLocaleString('zh-CN')}\n` +
-            `成功: ${successCount}/${totalCount} 个应用`
-          );
-        }
-      }
-      */
-      
-      return results;
-    } catch (error) {
-      console.error("[cron] error:", error);
-    }
-  }
-  return [];
 }
 
 // 设置Telegram Webhook
@@ -726,6 +768,51 @@ async function getWebhookInfo(env) {
   } catch (error) {
     console.error('Get webhook info error:', error);
     return { ok: false, error: error.message };
+  }
+}
+
+// 定时任务 - 所有app都会在UTC 0点尝试启动一次
+async function runAllInSchedule(env) {
+  const now = new Date();
+  const utcH = now.getUTCHours();
+  const utcM = now.getUTCMinutes();
+  const allowedUtcHour = 0;
+  
+  if (utcH === allowedUtcHour && utcM % 2 === 0) {
+    console.log(`[cron] hit ${pad(utcH)}:${pad(utcM)} UTC → starting all apps`);
+    
+    try {
+      const APPS = JSON.parse(env.APPS_CONFIG || "[]");
+      
+      // 清除所有应用的锁定状态
+      const clearResult = await clearAllAppLocks(env);
+      console.log(`[cron] cleared ${clearResult.clearedCount} app locks`);
+      
+      const results = [];
+      
+      for (const app of APPS) {
+        if (app.enabled !== false) {
+          const result = await ensureAppRunning(app, env, { reason: "cron" });
+          results.push(result);
+          await sleep(1000); // 每个app之间延迟1秒
+        }
+      }
+      
+      console.log("[cron] completed with results:", results);
+      
+      // 统计结果
+      const successCount = results.filter(r => r.success).length;
+      const totalCount = results.length;
+      console.log(`[cron] ${successCount}/${totalCount} apps processed successfully`);
+      
+      return results;
+    } catch (error) {
+      console.error("[cron] config error:", error);
+      return [{ success: false, error: "Config parse error" }];
+    }
+  } else {
+    console.log(`[cron] skip at ${pad(utcH)}:${pad(utcM)} UTC`);
+    return [];
   }
 }
 
@@ -800,18 +887,193 @@ export default {
         return new Response('Method not allowed', { status: 405 });
       }
       
-      // 默认响应
-      return json({ 
-        ok: true, 
-        message: "CF App Manager with Telegram Bot (Admin Only)",
-        telegram_webhook: "/webhook",
-        setup_instructions: {
-          step1: "极速部署：一键配置Cloudflare Workers",
-          step2: "设置环境变量：TELEGRAM_BOT_TOKEN和TELEGRAM_ADMIN_IDS",
-          step3: `设置Webhook：GET https://${host}/webhook?action=set`,
-          step4: "在Telegram中向您的机器人发送 /start 命令"
-        }
-      });
+      // 解析应用配置
+      let APPS;
+      try {
+        APPS = JSON.parse(env.APPS_CONFIG || "[]");
+        console.log("APPS parsed successfully:", APPS.length, "apps");
+      } catch (e) {
+        console.error("JSON parse error:", e.message);
+        return json({ 
+          ok: false, 
+          error: "Invalid APPS_CONFIG JSON format",
+          details: e.message
+        }, 500);
+      }
+      
+      // API 路由处理
+      switch (url.pathname) {
+        case "/list-apps":
+          const appsList = APPS.map(app => ({
+            name: app.name,
+            enabled: app.enabled !== false,
+            description: app.description || "",
+            hasPing: !!app.APP_PING_URL,
+            config: {
+              hasAPI: !!app.CF_API,
+              hasUAA: !!app.UAA_URL,
+              hasCredentials: !!(app.CF_USERNAME && app.CF_PASSWORD),
+              hasGUID: !!app.APP_GUID
+            }
+          }));
+          return json({ ok: true, apps: appsList, total: appsList.length });
+          
+        case "/start":
+          const appName = url.searchParams.get("app");
+          const force = url.searchParams.get("force") === "1";
+          
+          if (appName) {
+            const appConfig = APPS.find(a => a.name === appName);
+            if (!appConfig) return json({ ok: false, error: "App not found" }, 404);
+            
+            ctx.waitUntil(ensureAppRunning(appConfig, env, { reason: "manual", force }));
+            return json({ ok: true, app: appName, force, message: "Start requested" });
+          } else {
+            const promises = APPS
+              .filter(app => app.enabled !== false)
+              .map(app => ensureAppRunning(app, env, { reason: "manual-all", force }));
+            
+            ctx.waitUntil(Promise.all(promises));
+            return json({ ok: true, message: "All enabled apps start requested", force, count: promises.length });
+          }
+          
+        case "/stop":
+          const stopAppName = url.searchParams.get("app");
+          if (!stopAppName) return json({ ok: false, error: "app parameter required" }, 400);
+          
+          const stopAppConfig = APPS.find(a => a.name === stopAppName);
+          if (!stopAppConfig) return json({ ok: false, error: "App not found" }, 404);
+          
+          const stopResult = await stopApp(stopAppConfig, env);
+          return json(stopResult);
+          
+        case "/state":
+          const stateAppName = url.searchParams.get("app");
+          
+          if (stateAppName) {
+            const stateAppConfig = APPS.find(a => a.name === stateAppName);
+            if (!stateAppConfig) return json({ ok: false, error: "App not found" }, 404);
+            
+            const stateResult = await getAppStatus(stateAppConfig, env);
+            return json(stateResult);
+          } else {
+            const statePromises = APPS
+              .filter(app => app.enabled !== false)
+              .map(app => getAppStatus(app, env));
+            
+            const allStates = await Promise.all(statePromises);
+            return json({ ok: true, apps: allStates, total: allStates.length });
+          }
+          
+        case "/diag":
+          const now = new Date();
+          const utcH = now.getUTCHours();
+          const utcM = now.getUTCMinutes();
+          const secondsUntilMidnight = getSecondsUntilNextUTCMidnight();
+          
+          // 检查KV状态
+          const kvStatus = {
+            available: !!env.START_LOCK,
+            binding: "START_LOCK",
+            type: typeof env.START_LOCK
+          };
+          
+          return json({ 
+            ok: true, 
+            app_count: APPS.length,
+            enabled_count: APPS.filter(app => app.enabled !== false).length,
+            current_time: now.toISOString(),
+            utc_time: `${pad(utcH)}:${pad(utcM)} UTC`,
+            seconds_until_utc_midnight: secondsUntilMidnight,
+            kv_status: kvStatus,
+            next_utc_midnight: new Date(Date.now() + secondsUntilMidnight * 1000).toISOString(),
+            lock_mechanism: "daily_lock_until_utc_midnight"
+          });
+          
+        case "/unlock":
+          const unlockAppName = url.searchParams.get("app");
+          const ymd = new Date().toISOString().slice(0, 10);
+          
+          if (unlockAppName) {
+            const lockKey = `start-lock:${unlockAppName}:${ymd}`;
+            const deleted = await kvDelete(env, lockKey);
+            return json({ 
+              ok: true, 
+              deleted: lockKey, 
+              success: deleted,
+              app: unlockAppName 
+            });
+          } else {
+            const deletedKeys = [];
+            for (const app of APPS) {
+              const lockKey = `start-lock:${app.name}:${ymd}`;
+              const success = await kvDelete(env, lockKey);
+              deletedKeys.push({ 
+                app: app.name, 
+                lockKey,
+                success 
+              });
+            }
+            return json({ 
+              ok: true, 
+              deleted: deletedKeys, 
+              message: "All app locks cleared" 
+            });
+          }
+          
+        case "/locks":
+          const ymdToday = new Date().toISOString().slice(0, 10);
+          const lockStatus = [];
+          
+          for (const app of APPS) {
+            const lockKey = `start-lock:${app.name}:${ymdToday}`;
+            const exists = await kvGet(env, lockKey);
+            lockStatus.push({
+              app: app.name,
+              locked: !!exists,
+              lockKey: lockKey,
+              kvAvailable: !!env.START_LOCK
+            });
+          }
+          
+          return json({ 
+            ok: true, 
+            locks: lockStatus, 
+            date: ymdToday,
+            kvAvailable: !!env.START_LOCK
+          });
+          
+        case "/clear-locks":
+          // 清除所有应用的锁定状态
+          const clearResult = await clearAllAppLocks(env);
+          return json(clearResult);
+          
+        default:
+          return json({ 
+            ok: true, 
+            message: "Multi-App Cloud Foundry Manager with Telegram Bot",
+            version: "3.0",
+            description: "Each app has independent daily lock that expires at UTC midnight with Telegram Bot integration",
+            endpoints: [
+              "GET /list-apps - List all configured apps",
+              "GET /start?app=name - Start specific app",
+              "GET /start?app=name&force=1 - Force start specific app",
+              "GET /start - Start all enabled apps", 
+              "GET /stop?app=name - Stop specific app",
+              "GET /state?app=name - Get app status",
+              "GET /state - Get all apps status",
+              "GET /diag - Diagnostic information",
+              "GET /unlock?app=name - Remove daily lock for app",
+              "GET /unlock - Remove all daily locks",
+              "GET /locks - Check current lock status",
+              "GET /clear-locks - Clear all app locks (force unlock)",
+              "POST /webhook - Telegram webhook endpoint",
+              "GET /webhook?action=set - Set Telegram webhook",
+              "GET /webhook?action=info - Get webhook info",
+              "GET /webhook?action=delete - Delete webhook"
+            ]
+          });
+      }
       
     } catch (error) {
       console.error("[fetch error]", error?.message || error);
