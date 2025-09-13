@@ -54,6 +54,7 @@ function getSecondsUntilNextUTCMidnight() {
     ));
     return Math.floor((todayUTCMidnight - now) / 1000);
   }
+    return Math.max(3600, seconds); // 确保至少1小时
 }
 
 // Telegram Bot 工具函数
