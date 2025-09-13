@@ -26,27 +26,34 @@ async function sendPermissionDenied(env, chatId) {
   );
 }
 
-// 计算到第二天UTC 0点的秒数
+// 计算到下一个UTC 0点的秒数
 function getSecondsUntilNextUTCMidnight() {
   const now = new Date();
-  const utcNow = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-    now.getUTCHours(),
-    now.getUTCMinutes(),
-    now.getUTCSeconds()
-  );
+  const currentUTCHours = now.getUTCHours();
+  const currentUTCMinutes = now.getUTCMinutes();
+  const currentUTCSeconds = now.getUTCSeconds();
   
-  const nextUTCMidnight = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate() + 1,
-    0, 0, 0
-  );
-  
-  const seconds = Math.floor((nextUTCMidnight - utcNow) / 1000);
-  return Math.max(3600, seconds);
+  // 如果当前时间已经过了UTC 0点，则计算到明天UTC 0点的秒数
+  // 否则计算到今天UTC 0点的秒数
+  if (currentUTCHours > 0 || currentUTCMinutes > 0 || currentUTCSeconds > 0) {
+    // 已经过了UTC 0点，计算到明天UTC 0点的秒数
+    const nextUTCMidnight = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate() + 1,
+      0, 0, 0, 0
+    ));
+    return Math.floor((nextUTCMidnight - now) / 1000);
+  } else {
+    // 还没到UTC 0点，计算到今天UTC 0点的秒数
+    const todayUTCMidnight = new Date(Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      0, 0, 0, 0
+    ));
+    return Math.floor((todayUTCMidnight - now) / 1000);
+  }
 }
 
 // Telegram Bot 工具函数
@@ -254,8 +261,24 @@ async function waitProcessInstancesRunning(api, tok, pid) {
 async function ensureAppRunning(appConfig, env, { reason = "unknown", force = false } = {}) {
   console.log(`[${appConfig.name}] trigger`, reason, new Date().toISOString());
   
-  const ymd = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const ymd = now.toISOString().slice(0, 10);
   const lockKey = `start-lock:${appConfig.name}:${ymd}`;
+  
+  // 检查当前UTC时间，如果已经过了0点，则强制解锁
+  const currentUTCHour = now.getUTCHours();
+  const currentUTCMinute = now.getUTCMinutes();
+  
+  // 如果当前UTC时间在0点之后，清除昨天的锁
+  if (currentUTCHour > 0 || currentUTCMinute > 0) {
+    const yesterday = new Date(now);
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1);
+    const yesterdayYmd = yesterday.toISOString().slice(0, 10);
+    const yesterdayLockKey = `start-lock:${appConfig.name}:${yesterdayYmd}`;
+    
+    // 删除昨天的锁
+    await env.START_LOCK.delete(yesterdayLockKey);
+  }
   
   if (!force) {
     const ex = await env.START_LOCK.get(lockKey);
@@ -642,7 +665,8 @@ async function runAllInSchedule(env) {
         }
       }
       
-      // 发送Telegram通知给所有管理员
+      // 注释掉以下Telegram通知代码，关闭启动通知
+      /*
       if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_ADMIN_IDS) {
         const adminIds = env.TELEGRAM_ADMIN_IDS.split(',').map(id => id.trim());
         const successCount = results.filter(r => r.success).length;
@@ -656,6 +680,7 @@ async function runAllInSchedule(env) {
           );
         }
       }
+      */
       
       return results;
     } catch (error) {
