@@ -3,8 +3,8 @@ const pad = n => String(n).padStart(2, "0");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (o, c = 200) => new Response(JSON.stringify(o), { status: c, headers: { "content-type": "application/json" } });
 
-// 计算到第二天UTC 0点的秒数
-function getSecondsUntilNextUTCMidnight() {
+// 计算到最近UTC 0点的秒数（可能是今天或明天）
+function getSecondsUntilUTCMidnight() {
   const now = new Date();
   const utcNow = Date.UTC(
     now.getUTCFullYear(),
@@ -15,15 +15,24 @@ function getSecondsUntilNextUTCMidnight() {
     now.getUTCSeconds()
   );
   
-  // 明天UTC 0点
-  const nextUTCMidnight = Date.UTC(
+  // 当天UTC 0点
+  const todayUTCMidnight = Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
-    now.getUTCDate() + 1,
+    now.getUTCDate(),
     0, 0, 0
   );
   
-  const seconds = Math.floor((nextUTCMidnight - utcNow) / 1000);
+  let seconds;
+  if (utcNow >= todayUTCMidnight) {
+    // 已经过了今天0点，计算到明天0点
+    const tomorrowUTCMidnight = todayUTCMidnight + 86400000; // 24小时
+    seconds = Math.floor((tomorrowUTCMidnight - utcNow) / 1000);
+  } else {
+    // 还没到今天0点，计算到今天0点
+    seconds = Math.floor((todayUTCMidnight - utcNow) / 1000);
+  }
+  
   return Math.max(3600, seconds); // 确保至少1小时
 }
 
