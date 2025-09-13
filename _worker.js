@@ -3,8 +3,50 @@ const pad = n => String(n).padStart(2, "0");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (o, c = 200) => new Response(JSON.stringify(o), { status: c, headers: { "content-type": "application/json" } });
 
-// 计算到最近UTC 0点的秒数（可能是今天或明天）
-function getSecondsUntilUTCMidnight() {
+// KV辅助函数
+async function kvGet(env, key) {
+  if (!env.START_LOCK) {
+    console.warn("KV START_LOCK not available, returning null for", key);
+    return null;
+  }
+  try {
+    return await env.START_LOCK.get(key);
+  } catch (error) {
+    console.error("KV get error:", error.message);
+    return null;
+  }
+}
+
+async function kvPut(env, key, value, options = {}) {
+  if (!env.START_LOCK) {
+    console.warn("KV START_LOCK not available, skip put", key);
+    return false;
+  }
+  try {
+    await env.START_LOCK.put(key, value, options);
+    return true;
+  } catch (error) {
+    console.error("KV put error:", error.message);
+    return false;
+  }
+}
+
+async function kvDelete(env, key) {
+  if (!env.START_LOCK) {
+    console.warn("KV START_LOCK not available, skip delete", key);
+    return false;
+  }
+  try {
+    await env.START_LOCK.delete(key);
+    return true;
+  } catch (error) {
+    console.error("KV delete error:", error.message);
+    return false;
+  }
+}
+
+// 计算到第二天UTC 0点的秒数
+function getSecondsUntilNextUTCMidnight() {
   const now = new Date();
   const utcNow = Date.UTC(
     now.getUTCFullYear(),
@@ -15,24 +57,15 @@ function getSecondsUntilUTCMidnight() {
     now.getUTCSeconds()
   );
   
-  // 当天UTC 0点
-  const todayUTCMidnight = Date.UTC(
+  // 明天UTC 0点
+  const nextUTCMidnight = Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
-    now.getUTCDate(),
+    now.getUTCDate() + 1,
     0, 0, 0
   );
   
-  let seconds;
-  if (utcNow >= todayUTCMidnight) {
-    // 已经过了今天0点，计算到明天0点
-    const tomorrowUTCMidnight = todayUTCMidnight + 86400000; // 24小时
-    seconds = Math.floor((tomorrowUTCMidnight - utcNow) / 1000);
-  } else {
-    // 还没到今天0点，计算到今天0点
-    seconds = Math.floor((todayUTCMidnight - utcNow) / 1000);
-  }
-  
+  const seconds = Math.floor((nextUTCMidnight - utcNow) / 1000);
   return Math.max(3600, seconds); // 确保至少1小时
 }
 
@@ -143,7 +176,7 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
   const lockKey = `start-lock:${appConfig.name}:${ymd}`;
   
   if (!force) {
-    const ex = await env.START_LOCK.get(lockKey);
+    const ex = await kvGet(env, lockKey);
     if (ex) {
       console.log(`[${appConfig.name}] lock exists, skip`, lockKey);
       return { success: false, app: appConfig.name, reason: "locked" };
@@ -166,7 +199,7 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
       console.log(`[${appConfig.name}] already RUNNING → nothing to do`);
       // 即使已经在运行，也设置锁（在第二天UTC0点过期）
       const expirationTtl = getSecondsUntilNextUTCMidnight();
-      await env.START_LOCK.put(lockKey, "1", { expirationTtl });
+      await kvPut(env, lockKey, "1", { expirationTtl });
       console.log(`[${appConfig.name}] lock set until next UTC midnight`, lockKey);
       return { success: true, app: appConfig.name, reason: "already_running" };
     }
@@ -193,7 +226,7 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
 
     // 设置锁，在第二天UTC 0点过期
     const expirationTtl = getSecondsUntilNextUTCMidnight();
-    await env.START_LOCK.put(lockKey, "1", { expirationTtl });
+    await kvPut(env, lockKey, "1", { expirationTtl });
     console.log(`[${appConfig.name}] lock set for ${expirationTtl} seconds`, lockKey);
     
     return { success: true, app: appConfig.name };
@@ -379,6 +412,13 @@ export default {
           const utcM = now.getUTCMinutes();
           const secondsUntilMidnight = getSecondsUntilNextUTCMidnight();
           
+          // 检查KV状态
+          const kvStatus = {
+            available: !!env.START_LOCK,
+            binding: "START_LOCK",
+            type: typeof env.START_LOCK
+          };
+          
           return json({ 
             ok: true, 
             app_count: APPS.length,
@@ -386,6 +426,7 @@ export default {
             current_time: now.toISOString(),
             utc_time: `${pad(utcH)}:${pad(utcM)} UTC`,
             seconds_until_utc_midnight: secondsUntilMidnight,
+            kv_status: kvStatus,
             next_utc_midnight: new Date(Date.now() + secondsUntilMidnight * 1000).toISOString(),
             lock_mechanism: "daily_lock_until_utc_midnight"
           });
@@ -396,16 +437,29 @@ export default {
           
           if (unlockAppName) {
             const lockKey = `start-lock:${unlockAppName}:${ymd}`;
-            await env.START_LOCK.delete(lockKey);
-            return json({ ok: true, deleted: lockKey, app: unlockAppName });
+            const deleted = await kvDelete(env, lockKey);
+            return json({ 
+              ok: true, 
+              deleted: lockKey, 
+              success: deleted,
+              app: unlockAppName 
+            });
           } else {
             const deletedKeys = [];
             for (const app of APPS) {
               const lockKey = `start-lock:${app.name}:${ymd}`;
-              await env.START_LOCK.delete(lockKey);
-              deletedKeys.push({ app: app.name, lockKey });
+              const success = await kvDelete(env, lockKey);
+              deletedKeys.push({ 
+                app: app.name, 
+                lockKey,
+                success 
+              });
             }
-            return json({ ok: true, deleted: deletedKeys, message: "All app locks cleared" });
+            return json({ 
+              ok: true, 
+              deleted: deletedKeys, 
+              message: "All app locks cleared" 
+            });
           }
           
         case "/locks":
@@ -414,15 +468,21 @@ export default {
           
           for (const app of APPS) {
             const lockKey = `start-lock:${app.name}:${ymdToday}`;
-            const exists = await env.START_LOCK.get(lockKey);
+            const exists = await kvGet(env, lockKey);
             lockStatus.push({
               app: app.name,
               locked: !!exists,
-              lockKey: lockKey
+              lockKey: lockKey,
+              kvAvailable: !!env.START_LOCK
             });
           }
           
-          return json({ ok: true, locks: lockStatus, date: ymdToday });
+          return json({ 
+            ok: true, 
+            locks: lockStatus, 
+            date: ymdToday,
+            kvAvailable: !!env.START_LOCK
+          });
           
         default:
           return json({ 
