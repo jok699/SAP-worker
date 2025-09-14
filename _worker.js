@@ -1,4 +1,4 @@
-// 单文件多应用管理器 - 每个app独立锁死机制
+// 单文件多应用管理器 - 独立锁死机制
 const pad = n => String(n).padStart(2, "0");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (o, c = 200) => new Response(JSON.stringify(o), { status: c, headers: { "content-type": "application/json" } });
@@ -54,7 +54,8 @@ function getSecondsUntilNextUTCMidnight() {
     now.getUTCDate(),
     now.getUTCHours(),
     now.getUTCMinutes(),
-    now.getUTCSeconds()
+    now.getUTCSeconds(),
+    now.getUTCMilliseconds()
   );
   
   // 明天UTC 0点
@@ -62,7 +63,7 @@ function getSecondsUntilNextUTCMidnight() {
     now.getUTCFullYear(),
     now.getUTCMonth(),
     now.getUTCDate() + 1,
-    0, 0, 0
+    0, 0, 0, 0
   );
   
   const seconds = Math.floor((nextUTCMidnight - utcNow) / 1000);
@@ -278,6 +279,45 @@ async function getAppStatus(appConfig, env) {
   }
 }
 
+// 获取应用锁状态
+async function getAppLockStatus(appConfig, env) {
+  const ymd = new Date().toISOString().slice(0, 10);
+  const lockKey = `start-lock:${appConfig.name}:${ymd}`;
+  const locked = !!(await kvGet(env, lockKey));
+  
+  return {
+    app: appConfig.name,
+    locked: locked,
+    lockKey: lockKey
+  };
+}
+
+// 清除所有应用的锁定状态
+async function clearAllAppLocks(env) {
+  try {
+    const APPS = JSON.parse(env.APPS_CONFIG || "[]");
+    const enabledApps = APPS.filter(app => app.enabled !== false);
+    const today = new Date().toISOString().slice(0, 10);
+    let clearedCount = 0;
+    
+    for (const app of enabledApps) {
+      const lockKey = `start-lock:${app.name}:${today}`;
+      const wasLocked = !!(await kvGet(env, lockKey));
+      
+      if (wasLocked) {
+        await kvDelete(env, lockKey);
+        clearedCount++;
+        console.log(`Cleared lock for ${app.name}`);
+      }
+    }
+    
+    return { success: true, clearedCount, totalCount: enabledApps.length };
+  } catch (error) {
+    console.error('Clear all locks error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // 定时任务 - 所有app都会在UTC 0点尝试启动一次
 async function runAllInSchedule(env) {
   const now = new Date();
@@ -290,6 +330,11 @@ async function runAllInSchedule(env) {
     
     try {
       const APPS = JSON.parse(env.APPS_CONFIG || "[]");
+      
+      // 清除所有应用的锁定状态
+      const clearResult = await clearAllAppLocks(env);
+      console.log(`[cron] cleared ${clearResult.clearedCount} app locks`);
+      
       const results = [];
       
       for (const app of APPS) {
@@ -484,11 +529,16 @@ export default {
             kvAvailable: !!env.START_LOCK
           });
           
+        case "/clear-locks":
+          // 清除所有应用的锁定状态
+          const clearResult = await clearAllAppLocks(env);
+          return json(clearResult);
+          
         default:
           return json({ 
             ok: true, 
-            message: "Multi-App Cloud Foundry Manager - Fixed Lock Mechanism",
-            version: "2.1",
+            message: "Multi-App Cloud Foundry Manager",
+            version: "3.0",
             description: "Each app has independent daily lock that expires at UTC midnight",
             endpoints: [
               "GET /list-apps - List all configured apps",
@@ -501,7 +551,8 @@ export default {
               "GET /diag - Diagnostic information",
               "GET /unlock?app=name - Remove daily lock for app",
               "GET /unlock - Remove all daily locks",
-              "GET /locks - Check current lock status"
+              "GET /locks - Check current lock status",
+              "GET /clear-locks - Clear all app locks (force unlock)"
             ]
           });
       }
