@@ -70,6 +70,44 @@ function getSecondsUntilNextUTCMidnight() {
   return Math.max(3600, seconds); // 确保至少1小时
 }
 
+// 删除应用的所有旧锁（保留当前锁）
+async function cleanupOldLocks(env, appName, currentLockKey) {
+  try {
+    // 获取当前日期
+    const today = new Date().toISOString().slice(0, 10);
+    
+    // 列出所有可能的锁键（最近7天）
+    const lockKeysToDelete = [];
+    for (let i = 1; i <= 7; i++) {
+      const date = new Date();
+      date.setDate(date.getDate() - i);
+      const oldDate = date.toISOString().slice(0, 10);
+      const oldLockKey = `start-lock:${appName}:${oldDate}`;
+      
+      // 不要删除当前锁
+      if (oldLockKey !== currentLockKey) {
+        lockKeysToDelete.push(oldLockKey);
+      }
+    }
+    
+    // 删除所有旧锁
+    let deletedCount = 0;
+    for (const key of lockKeysToDelete) {
+      const wasDeleted = await kvDelete(env, key);
+      if (wasDeleted) {
+        deletedCount++;
+        console.log(`Deleted old lock: ${key}`);
+      }
+    }
+    
+    console.log(`Cleaned up ${deletedCount} old locks for ${appName}`);
+    return deletedCount;
+  } catch (error) {
+    console.error(`Cleanup old locks error for ${appName}:`, error.message);
+    return 0;
+  }
+}
+
 // 工具函数
 async function cfGET(u, t) {
   const r = await fetch(u, { headers: { authorization: `Bearer ${t}` } });
@@ -201,6 +239,10 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
       // 即使已经在运行，也设置锁（在第二天UTC0点过期）
       const expirationTtl = getSecondsUntilNextUTCMidnight();
       await kvPut(env, lockKey, "1", { expirationTtl });
+      
+      // 清理旧锁
+      ctx.waitUntil(cleanupOldLocks(env, appConfig.name, lockKey));
+      
       console.log(`[${appConfig.name}] lock set until next UTC midnight`, lockKey);
       return { success: true, app: appConfig.name, reason: "already_running" };
     }
@@ -228,6 +270,10 @@ async function ensureAppRunning(appConfig, env, { reason = "unknown", force = fa
     // 设置锁，在第二天UTC 0点过期
     const expirationTtl = getSecondsUntilNextUTCMidnight();
     await kvPut(env, lockKey, "1", { expirationTtl });
+    
+    // 清理旧锁
+    ctx.waitUntil(cleanupOldLocks(env, appConfig.name, lockKey));
+    
     console.log(`[${appConfig.name}] lock set for ${expirationTtl} seconds`, lockKey);
     
     return { success: true, app: appConfig.name };
@@ -318,6 +364,28 @@ async function clearAllAppLocks(env) {
   }
 }
 
+// 清理所有应用的旧锁
+async function cleanupAllOldLocks(env) {
+  try {
+    const APPS = JSON.parse(env.APPS_CONFIG || "[]");
+    const enabledApps = APPS.filter(app => app.enabled !== false);
+    let totalCleaned = 0;
+    
+    for (const app of enabledApps) {
+      const today = new Date().toISOString().slice(0, 10);
+      const currentLockKey = `start-lock:${app.name}:${today}`;
+      const cleaned = await cleanupOldLocks(env, app.name, currentLockKey);
+      totalCleaned += cleaned;
+    }
+    
+    console.log(`Cleaned up ${totalCleaned} old locks in total`);
+    return { success: true, cleanedCount: totalCleaned };
+  } catch (error) {
+    console.error('Cleanup all old locks error:', error);
+    return { success: false, error: error.message };
+  }
+}
+
 // 定时任务 - 所有app都会在UTC 0点尝试启动一次
 async function runAllInSchedule(env) {
   const now = new Date();
@@ -371,6 +439,9 @@ export default {
   
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    
+    // 保存ctx供ensureAppRunning使用
+    globalThis.ctx = ctx;
     
     try {
       // 解析应用配置
@@ -534,6 +605,11 @@ export default {
           const clearResult = await clearAllAppLocks(env);
           return json(clearResult);
           
+        case "/cleanup-old-locks":
+          // 清理所有应用的旧锁
+          const cleanupResult = await cleanupAllOldLocks(env);
+          return json(cleanupResult);
+          
         default:
           return json({ 
             ok: true, 
@@ -552,7 +628,8 @@ export default {
               "GET /unlock?app=name - Remove daily lock for app",
               "GET /unlock - Remove all daily locks",
               "GET /locks - Check current lock status",
-              "GET /clear-locks - Clear all app locks (force unlock)"
+              "GET /clear-locks - Clear all app locks (force unlock)",
+              "GET /cleanup-old-locks - Cleanup old locks (keep KV space clean)"
             ]
           });
       }
