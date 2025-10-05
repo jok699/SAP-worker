@@ -1,4 +1,4 @@
-// 单文件多应用管理器 - 集成Telegram Bot和独立锁死机制
+// 单文件多应用管理器 - 集成Telegram Bot和独立锁死机制，包含应用事件记录
 const pad = n => String(n).padStart(2, "0");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = (o, c = 200) => new Response(JSON.stringify(o), { status: c, headers: { "content-type": "application/json" } });
@@ -191,11 +191,48 @@ function createAppDetailKeyboard(appName) {
         { text: "🚀 启动", callback_data: `startapp_${appName}` }
       ],
       [
+        { text: "🔄 刷新详情", callback_data: `app_detail_${appName}` },
+        { text: "📜 更多记录", callback_data: `more_events_${appName}_1` }
+      ],
+      [
         { text: "↩️ 返回列表", callback_data: "list_apps" },
         { text: "🏠 返回主页", callback_data: "main_menu" }
       ]
     ]
   };
+}
+
+// 生成事件记录键盘（分页）
+function createEventsKeyboard(appName, currentPage = 1, totalPages = 1) {
+  const keyboard = {
+    inline_keyboard: []
+  };
+  
+  // 分页按钮
+  const pageButtons = [];
+  if (currentPage > 1) {
+    pageButtons.push({ text: "◀️ 上一页", callback_data: `more_events_${appName}_${currentPage - 1}` });
+  }
+  pageButtons.push({ text: `📄 ${currentPage}/${totalPages}`, callback_data: `no_action` });
+  if (currentPage < totalPages) {
+    pageButtons.push({ text: "下一页 ▶️", callback_data: `more_events_${appName}_${currentPage + 1}` });
+  }
+  
+  if (pageButtons.length > 0) {
+    keyboard.inline_keyboard.push(pageButtons);
+  }
+  
+  // 操作按钮
+  keyboard.inline_keyboard.push([
+    { text: "🔙 返回详情", callback_data: `app_detail_${appName}` },
+    { text: "↩️ 返回列表", callback_data: "list_apps" }
+  ]);
+  
+  keyboard.inline_keyboard.push([
+    { text: "🏠 返回主页", callback_data: "main_menu" }
+  ]);
+  
+  return keyboard;
 }
 
 // 工具函数
@@ -294,6 +331,269 @@ async function waitProcessInstancesRunning(api, tok, pid) {
     d = Math.min(d * 1.6, 15000);
   }
   throw new Error("Process instances not RUNNING in time");
+}
+
+// 获取应用事件记录（直接从CF API获取）- 修复版
+async function getAppEventsFromCF(appConfig, env, days = 3) {
+  try {
+    const api = appConfig.CF_API.replace(/\/+$/, "");
+    const tok = await getUAAToken(appConfig);
+    const gid = await resolveAppGuid(appConfig, tok, api);
+    
+    // 计算时间范围 - 使用更精确的时间格式
+    const endTime = new Date();
+    const startTime = new Date(endTime.getTime() - (days * 24 * 60 * 60 * 1000));
+    const startTimeISO = startTime.toISOString();
+    
+    console.log(`[${appConfig.name}] Fetching events from: ${startTimeISO}`);
+    
+    // 尝试不同的查询方式
+    let events = { resources: [] };
+    
+    // 方式1: 查询应用相关的事件
+    try {
+      events = await cfGET(
+        `${api}/v3/audit_events?target_guids=${gid}&per_page=100`,
+        tok
+      );
+      console.log(`[${appConfig.name}] Found ${events.resources?.length || 0} events for app`);
+    } catch (e) {
+      console.log(`[${appConfig.name}] App events query failed:`, e.message);
+    }
+    
+    // 方式2: 如果没有事件，尝试查询空间级别的事件
+    if (!events.resources || events.resources.length === 0) {
+      try {
+        // 获取空间GUID
+        const org = await cfGET(`${api}/v3/organizations?names=${encodeURIComponent(appConfig.ORG_NAME)}`, tok);
+        const orgGuid = org.resources[0].guid;
+        const space = await cfGET(`${api}/v3/spaces?names=${encodeURIComponent(appConfig.SPACE_NAME)}&organization_guids=${orgGuid}`, tok);
+        const spaceGuid = space.resources[0].guid;
+        
+        events = await cfGET(
+          `${api}/v3/audit_events?space_guids=${spaceGuid}&per_page=100`,
+          tok
+        );
+        console.log(`[${appConfig.name}] Found ${events.resources?.length || 0} events for space`);
+      } catch (e) {
+        console.log(`[${appConfig.name}] Space events query failed:`, e.message);
+      }
+    }
+    
+    // 方式3: 查询所有事件然后过滤
+    if (!events.resources || events.resources.length === 0) {
+      try {
+        events = await cfGET(
+          `${api}/v3/audit_events?per_page=100`,
+          tok
+        );
+        console.log(`[${appConfig.name}] Found ${events.resources?.length || 0} total events`);
+        
+        // 手动过滤应用相关事件
+        if (events.resources) {
+          events.resources = events.resources.filter(event => {
+            // 检查事件是否与应用相关
+            if (event.target_guid === gid) return true;
+            if (event.actor?.name === appConfig.APP_NAME) return true;
+            if (event.data?.app_guid === gid) return true;
+            if (event.data?.request?.app_guid === gid) return true;
+            return false;
+          });
+          console.log(`[${appConfig.name}] Filtered to ${events.resources.length} app-related events`);
+        }
+      } catch (e) {
+        console.log(`[${appConfig.name}] General events query failed:`, e.message);
+      }
+    }
+    
+    // 过滤最近3天的事件
+    let filteredEvents = [];
+    if (events.resources) {
+      filteredEvents = events.resources.filter(event => {
+        const eventTime = new Date(event.created_at);
+        return eventTime >= startTime;
+      });
+    }
+    
+    // 按时间倒序排序
+    filteredEvents.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    
+    console.log(`[${appConfig.name}] Returning ${filteredEvents.length} events from last ${days} days`);
+    
+    return filteredEvents;
+    
+  } catch (error) {
+    console.error(`[${appConfig.name}] Get events error:`, error.message);
+    return [];
+  }
+}
+
+// 获取应用构建和部署记录
+async function getAppBuildsAndDeployments(appConfig, env) {
+  try {
+    const api = appConfig.CF_API.replace(/\/+$/, "");
+    const tok = await getUAAToken(appConfig);
+    const gid = await resolveAppGuid(appConfig, tok, api);
+    
+    const events = [];
+    
+    // 获取构建记录
+    try {
+      const builds = await cfGET(
+        `${api}/v3/builds?app_guids=${gid}&per_page=20&order_by=-created_at`,
+        tok
+      );
+      
+      if (builds.resources) {
+        builds.resources.forEach(build => {
+          events.push({
+            type: 'build',
+            created_at: build.created_at,
+            state: build.state,
+            guid: build.guid,
+            package_guid: build.package?.guid,
+            description: `构建 ${build.state}`
+          });
+        });
+      }
+    } catch (e) {
+      console.log(`[${appConfig.name}] Builds query failed:`, e.message);
+    }
+    
+    // 获取部署记录
+    try {
+      const deployments = await cfGET(
+        `${api}/v3/deployments?app_guids=${gid}&per_page=20&order_by=-created_at`,
+        tok
+      );
+      
+      if (deployments.resources) {
+        deployments.resources.forEach(deployment => {
+          events.push({
+            type: 'deployment',
+            created_at: deployment.created_at,
+            state: deployment.status?.value || 'unknown',
+            guid: deployment.guid,
+            description: `部署 ${deployment.status?.value || 'unknown'}`
+          });
+        });
+      }
+    } catch (e) {
+      console.log(`[${appConfig.name}] Deployments query failed:`, e.message);
+    }
+    
+    // 获取进程统计历史（通过缩放事件推断）
+    try {
+      const processes = await cfGET(`${api}/v3/apps/${gid}/processes`, tok);
+      const webProcess = processes?.resources?.find(p => p?.type === "web");
+      
+      if (webProcess) {
+        const processEvents = await cfGET(
+          `${api}/v3/processes/${webProcess.guid}/stats`,
+          tok
+        );
+        
+        // 这里可以分析实例数的变化来推断缩放事件
+        if (processEvents.resources) {
+          const instanceCount = processEvents.resources.length;
+          events.push({
+            type: 'scale',
+            created_at: new Date().toISOString(),
+            state: 'running',
+            description: `运行中实例: ${instanceCount}`
+          });
+        }
+      }
+    } catch (e) {
+      console.log(`[${appConfig.name}] Process stats query failed:`, e.message);
+    }
+    
+    // 按时间排序
+    events.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    
+    return events;
+    
+  } catch (error) {
+    console.error(`[${appConfig.name}] Get builds/deployments error:`, error.message);
+    return [];
+  }
+}
+
+// 获取应用详细状态和历史记录 - 增强版
+async function getAppDetailedStatus(appConfig, env) {
+  try {
+    const api = appConfig.CF_API.replace(/\/+$/, "");
+    const tok = await getUAAToken(appConfig);
+    const gid = await resolveAppGuid(appConfig, tok, api);
+    
+    // 获取应用基本信息
+    const appInfo = await cfGET(`${api}/v3/apps/${gid}`, tok);
+    
+    // 获取进程信息
+    const processes = await cfGET(`${api}/v3/apps/${gid}/processes`, tok);
+    const webProcess = processes?.resources?.find(p => p?.type === "web") || processes?.resources?.[0];
+    
+    // 获取进程统计
+    let processStats = { resources: [] };
+    if (webProcess) {
+      try {
+        processStats = await getProcessStats(api, tok, webProcess.guid);
+      } catch (e) {
+        console.log(`[${appConfig.name}] No process stats available`);
+      }
+    }
+    
+    // 获取最近事件 - 尝试多种方式
+    let recentEvents = await getAppEventsFromCF(appConfig, env, 3);
+    
+    // 如果还是没有事件，尝试获取构建和部署记录
+    if (recentEvents.length === 0) {
+      console.log(`[${appConfig.name}] No audit events found, trying builds/deployments`);
+      recentEvents = await getAppBuildsAndDeployments(appConfig, env);
+    }
+    
+    // 如果还是没有记录，创建一些基本状态记录
+    if (recentEvents.length === 0) {
+      console.log(`[${appConfig.name}] Creating basic status record`);
+      recentEvents = [{
+        type: 'app.status',
+        created_at: appInfo.updated_at || appInfo.created_at || new Date().toISOString(),
+        state: appInfo.state,
+        description: `应用状态: ${appInfo.state}`
+      }];
+    }
+    
+    return {
+      success: true,
+      app: appConfig.name,
+      appGuid: gid,
+      appState: appInfo?.state || "UNKNOWN",
+      created_at: appInfo?.created_at,
+      updated_at: appInfo?.updated_at,
+      instances: (processStats?.resources || []).map(it => ({
+        index: it?.index,
+        state: it?.state,
+        usage: it?.usage,
+        uptime: it?.uptime
+      })),
+      events: recentEvents,
+      process: webProcess ? {
+        guid: webProcess.guid,
+        type: webProcess.type,
+        instances: webProcess.instances,
+        memory_in_mb: webProcess.memory_in_mb,
+        disk_in_mb: webProcess.disk_in_mb
+      } : null
+    };
+  } catch (error) {
+    console.error(`[${appConfig.name}] Detailed status error:`, error.message);
+    return { 
+      success: false, 
+      app: appConfig.name, 
+      error: error.message,
+      events: [] 
+    };
+  }
 }
 
 // 核心函数 - 修复锁机制，确保每天UTC0点都能启动
@@ -486,7 +786,7 @@ async function showAppList(env, chatId) {
   }
 }
 
-// 显示应用详情（三级菜单）
+// 显示应用详情（增强版，包含历史记录）- 修复版
 async function showAppDetail(env, chatId, appName) {
   try {
     const APPS = JSON.parse(env.APPS_CONFIG || "[]");
@@ -497,8 +797,11 @@ async function showAppDetail(env, chatId, appName) {
       return;
     }
     
-    // 获取应用状态
-    const appStatus = await getAppStatus(app, env);
+    // 发送"查询中"消息
+    const loadingMsg = await sendTelegramMessage(env, chatId, '⏳ 正在查询应用状态和历史记录...');
+    
+    // 获取应用详细状态（包含事件记录）
+    const appStatus = await getAppDetailedStatus(app, env);
     const lockStatus = await getAppLockStatus(app, env);
     
     let statusIcon = '❓';
@@ -513,15 +816,292 @@ async function showAppDetail(env, chatId, appName) {
     message += `<b>状态:</b> ${statusIcon} ${appStatus.success ? appStatus.appState : '未知'}\n`;
     message += `<b>锁定状态:</b> ${lockIcon} ${lockStatus.locked ? '已锁定' : '已解锁'}\n`;
     
+    // 显示实例信息
+    if (appStatus.instances && appStatus.instances.length > 0) {
+      const runningInstances = appStatus.instances.filter(inst => inst.state === 'RUNNING').length;
+      message += `<b>运行实例:</b> ${runningInstances}/${appStatus.instances.length}\n`;
+    }
+    
+    if (appStatus.process) {
+      message += `<b>内存:</b> ${appStatus.process.memory_in_mb}MB\n`;
+      message += `<b>磁盘:</b> ${appStatus.process.disk_in_mb}MB\n`;
+    }
+    
+    if (appStatus.updated_at) {
+      const lastUpdated = new Date(appStatus.updated_at).toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      message += `<b>最后更新:</b> ${lastUpdated}\n`;
+    }
+    
     if (appStatus.error) {
       message += `<b>错误:</b> ${appStatus.error}\n`;
+    }
+    
+    // 添加事件记录 - 只显示最近3条
+    message += `\n⏰ <b>最近操作记录 (最近3条):</b>\n`;
+    
+    if (!appStatus.events || appStatus.events.length === 0) {
+      message += `暂无事件记录\n`;
+      message += `<i>这可能是因为：</i>\n`;
+      message += `<i>1. 应用最近没有操作</i>\n`;
+      message += `<i>2. API权限限制</i>\n`;
+      message += `<i>3. 事件保留时间较短</i>\n`;
+    } else {
+      const eventTypeMap = {
+        'audit.app.start': '🚀 启动',
+        'audit.app.stop': '🛑 停止', 
+        'audit.app.update': '📝 更新',
+        'audit.app.create': '🆕 创建',
+        'audit.app.restage': '🔄 重新部署',
+        'audit.app.crash': '💥 崩溃',
+        'audit.app.sshd': '🔐 SSH访问',
+        'build': '🔨 构建',
+        'deployment': '📦 部署',
+        'scale': '📊 缩放',
+        'app.status': '📱 状态'
+      };
+      
+      const stateMap = {
+        'STAGED': '已准备',
+        'STAGING': '准备中',
+        'STARTED': '已启动',
+        'STOPPED': '已停止',
+        'FAILED': '失败',
+        'running': '运行中',
+        'pending': '等待中',
+        'succeeded': '成功',
+        'failed': '失败'
+      };
+      
+      const recentEvents = appStatus.events.slice(0, 3); // 只显示最近3条记录
+      
+      for (const event of recentEvents) {
+        const eventTime = new Date(event.created_at).toLocaleString('zh-CN', {
+          timeZone: 'Asia/Shanghai',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        
+        const eventType = eventTypeMap[event.type] || `📝 ${event.type}`;
+        const eventState = stateMap[event.state] || event.state;
+        
+        message += `${eventType}`;
+        
+        if (eventState && eventState !== 'unknown') {
+          message += ` [${eventState}]`;
+        }
+        
+        message += `\n   ⏱️ ${eventTime}\n`;
+        
+        if (event.actor?.name || event.actor?.type) {
+          const actor = event.actor?.name || event.actor?.type;
+          message += `   👤 ${actor}\n`;
+        }
+        
+        if (event.description) {
+          message += `   📝 ${event.description}\n`;
+        }
+        
+        message += `\n`;
+      }
+      
+      // 如果有更多记录，显示提示
+      if (appStatus.events.length > 3) {
+        message += `📜 还有 ${appStatus.events.length - 3} 条记录，点击"更多记录"查看\n`;
+      }
+    }
+    
+    // 删除加载消息
+    try {
+      if (loadingMsg && loadingMsg.result && loadingMsg.result.message_id) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            message_id: loadingMsg.result.message_id
+          })
+        });
+      }
+    } catch (e) {
+      console.log('Delete loading message error:', e);
     }
     
     await sendTelegramMessage(env, chatId, message, 'HTML', createAppDetailKeyboard(appName));
     
   } catch (error) {
     console.error('Show app detail error:', error);
-    await sendTelegramMessage(env, chatId, '❌ 获取应用详情时出错', null, createBackKeyboard());
+    
+    // 确保删除加载消息
+    try {
+      if (loadingMsg && loadingMsg.result && loadingMsg.result.message_id) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            message_id: loadingMsg.result.message_id
+          })
+        });
+      }
+    } catch (e) {
+      console.log('Delete loading message error:', e);
+    }
+    
+    await sendTelegramMessage(env, chatId, 
+      '❌ 获取应用详情时出错\n错误信息: ' + error.message, 
+      null, 
+      createBackKeyboard()
+    );
+  }
+}
+
+// 显示更多事件记录（分页显示）
+async function showMoreEvents(env, chatId, appName, page = 1) {
+  try {
+    const APPS = JSON.parse(env.APPS_CONFIG || "[]");
+    const app = APPS.find(a => a.name === appName);
+    
+    if (!app) {
+      await sendTelegramMessage(env, chatId, '❌ 应用不存在', null, createBackKeyboard());
+      return;
+    }
+    
+    // 发送"查询中"消息
+    const loadingMsg = await sendTelegramMessage(env, chatId, '⏳ 正在查询更多操作记录...');
+    
+    // 获取应用详细状态（包含事件记录）
+    const appStatus = await getAppDetailedStatus(app, env);
+    
+    if (!appStatus.success) {
+      await sendTelegramMessage(env, chatId, '❌ 获取应用记录失败', null, createBackKeyboard());
+      return;
+    }
+    
+    const eventsPerPage = 8;
+    const totalEvents = appStatus.events.length;
+    const totalPages = Math.ceil(totalEvents / eventsPerPage);
+    const startIndex = (page - 1) * eventsPerPage;
+    const endIndex = startIndex + eventsPerPage;
+    const pageEvents = appStatus.events.slice(startIndex, endIndex);
+    
+    let message = `📜 <b>${app.name} - 操作记录</b>\n\n`;
+    message += `<b>页码:</b> ${page}/${totalPages}\n`;
+    message += `<b>总记录数:</b> ${totalEvents} 条\n\n`;
+    
+    if (pageEvents.length === 0) {
+      message += `暂无更多记录\n`;
+    } else {
+      const eventTypeMap = {
+        'audit.app.start': '🚀 启动',
+        'audit.app.stop': '🛑 停止', 
+        'audit.app.update': '📝 更新',
+        'audit.app.create': '🆕 创建',
+        'audit.app.restage': '🔄 重新部署',
+        'audit.app.crash': '💥 崩溃',
+        'audit.app.sshd': '🔐 SSH访问',
+        'build': '🔨 构建',
+        'deployment': '📦 部署',
+        'scale': '📊 缩放',
+        'app.status': '📱 状态'
+      };
+      
+      const stateMap = {
+        'STAGED': '已准备',
+        'STAGING': '准备中',
+        'STARTED': '已启动',
+        'STOPPED': '已停止',
+        'FAILED': '失败',
+        'running': '运行中',
+        'pending': '等待中',
+        'succeeded': '成功',
+        'failed': '失败'
+      };
+      
+      for (const event of pageEvents) {
+        const eventTime = new Date(event.created_at).toLocaleString('zh-CN', {
+          timeZone: 'Asia/Shanghai',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+        
+        const eventType = eventTypeMap[event.type] || `📝 ${event.type}`;
+        const eventState = stateMap[event.state] || event.state;
+        
+        message += `${eventType}`;
+        
+        if (eventState && eventState !== 'unknown') {
+          message += ` [${eventState}]`;
+        }
+        
+        message += `\n⏱️ ${eventTime}\n`;
+        
+        if (event.actor?.name || event.actor?.type) {
+          const actor = event.actor?.name || event.actor?.type;
+          message += `👤 ${actor}\n`;
+        }
+        
+        if (event.description) {
+          message += `📝 ${event.description}\n`;
+        }
+        
+        message += `\n`;
+      }
+    }
+    
+    // 删除加载消息
+    try {
+      if (loadingMsg && loadingMsg.result && loadingMsg.result.message_id) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            message_id: loadingMsg.result.message_id
+          })
+        });
+      }
+    } catch (e) {
+      console.log('Delete loading message error:', e);
+    }
+    
+    await sendTelegramMessage(env, chatId, message, 'HTML', createEventsKeyboard(appName, page, totalPages));
+    
+  } catch (error) {
+    console.error('Show more events error:', error);
+    
+    // 确保删除加载消息
+    try {
+      if (loadingMsg && loadingMsg.result && loadingMsg.result.message_id) {
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            message_id: loadingMsg.result.message_id
+          })
+        });
+      }
+    } catch (e) {
+      console.log('Delete loading message error:', e);
+    }
+    
+    await sendTelegramMessage(env, chatId, 
+      '❌ 获取操作记录时出错\n错误信息: ' + error.message, 
+      null, 
+      createBackKeyboard()
+    );
   }
 }
 
@@ -607,7 +1187,6 @@ async function handleTelegramCallback(env, callbackQuery) {
         
       case 'no_action':
         // 无操作，只是更新消息
-        await showAppList(env, chatId);
         break;
         
       case 'unlock_all':
@@ -627,7 +1206,7 @@ async function handleTelegramCallback(env, callbackQuery) {
           chatId, 
           `✅ 已解锁 ${unlockCount} 个应用`, 
           'HTML', 
-          createMainMenuKeyboard() // 返回主菜单而不是返回列表
+          createMainMenuKeyboard()
         );
         break;
         
@@ -678,7 +1257,7 @@ async function handleTelegramCallback(env, callbackQuery) {
           chatId, 
           resultMessage,
           'HTML',
-          createMainMenuKeyboard() // 返回主菜单
+          createMainMenuKeyboard()
         );
         break;
         
@@ -686,6 +1265,14 @@ async function handleTelegramCallback(env, callbackQuery) {
         if (data.startsWith('app_detail_')) {
           const appName = data.replace('app_detail_', '');
           await showAppDetail(env, chatId, appName);
+          break;
+        }
+        
+        if (data.startsWith('more_events_')) {
+          const parts = data.split('_');
+          const appName = parts[2];
+          const page = parseInt(parts[3]) || 1;
+          await showMoreEvents(env, chatId, appName, page);
           break;
         }
         
@@ -965,6 +1552,43 @@ export default {
             return json({ ok: true, apps: allStates, total: allStates.length });
           }
           
+        case "/detailed-status":
+          const detailAppName = url.searchParams.get("app");
+          
+          if (!detailAppName) {
+            return json({ ok: false, error: "app parameter required" }, 400);
+          }
+          
+          const detailAppConfig = APPS.find(a => a.name === detailAppName);
+          if (!detailAppConfig) {
+            return json({ ok: false, error: "App not found" }, 404);
+          }
+          
+          const detailedStatus = await getAppDetailedStatus(detailAppConfig, env);
+          return json(detailedStatus);
+          
+        case "/events":
+          const eventsAppName = url.searchParams.get("app");
+          const days = parseInt(url.searchParams.get("days")) || 3;
+          
+          if (!eventsAppName) {
+            return json({ ok: false, error: "app parameter required" }, 400);
+          }
+          
+          const eventsAppConfig = APPS.find(a => a.name === eventsAppName);
+          if (!eventsAppConfig) {
+            return json({ ok: false, error: "App not found" }, 404);
+          }
+          
+          const events = await getAppEventsFromCF(eventsAppConfig, env, days);
+          return json({ 
+            ok: true, 
+            app: eventsAppName,
+            days: days,
+            events: events,
+            count: events.length 
+          });
+          
         case "/diag":
           const now = new Date();
           const utcH = now.getUTCHours();
@@ -1053,7 +1677,7 @@ export default {
             ok: true, 
             message: "Multi-App Cloud Foundry Manager with Telegram Bot",
             version: "3.0",
-            description: "Each app has independent daily lock that expires at UTC midnight with Telegram Bot integration",
+            description: "Each app has independent daily lock that expires at UTC midnight with Telegram Bot integration and event history",
             endpoints: [
               "GET /list-apps - List all configured apps",
               "GET /start?app=name - Start specific app",
@@ -1062,6 +1686,8 @@ export default {
               "GET /stop?app=name - Stop specific app",
               "GET /state?app=name - Get app status",
               "GET /state - Get all apps status",
+              "GET /detailed-status?app=name - Get detailed app status with events",
+              "GET /events?app=name&days=3 - Get app events from CF API",
               "GET /diag - Diagnostic information",
               "GET /unlock?app=name - Remove daily lock for app",
               "GET /unlock - Remove all daily locks",
